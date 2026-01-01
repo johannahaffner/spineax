@@ -1,0 +1,3 @@
+[submodule "lineax"]
+	path = lineax
+	url = https://github.com/patrick-kidger/lineax.git
