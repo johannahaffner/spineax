@@ -1,3 +1,7 @@
+import os
+os.environ.setdefault('XLA_PYTHON_CLIENT_PREALLOCATE', 'false')
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '5')
+
 import functools as ft
 import jax
 import jax.core
@@ -910,8 +914,191 @@ def analyze_diagonal_pattern():
 #     run_diagonal_tests(batch_sizes=[1, 4, 16, 64])
 
 
+def test_state_sharing():
+    """
+    Test that refactorize_and_linear_solve and linear_solve share FFI state.
+
+    This replicates the jaxipm pattern:
+    1. Create solver
+    2. Create two partials: linear_solve (signal=0) and refactorize_and_linear_solve (signal=1)
+    3. Call refactorize_and_linear_solve first (does ANALYSIS + FACTORIZATION on first call)
+    4. Call linear_solve with same matrix but different RHS (should use cached factorization)
+    5. Verify results are correct
+    """
+    import functools as ft
+
+    print("\n" + "="*70)
+    print("TEST 1: Two separate call sites (current jaxipm pattern)")
+    print("="*70)
+
+    # Create a simple symmetric positive definite matrix
+    M = jnp.array([
+        [4., 1., 0., 0., 0.],
+        [1., 3., 1., 0., 0.],
+        [0., 1., 5., 1., 0.],
+        [0., 0., 1., 4., 1.],
+        [0., 0., 0., 1., 3.],
+    ])
+
+    # Two different RHS vectors
+    b1 = jnp.array([7.0, 8.0, 15.0, 10.0, 8.0])
+    b2 = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0])
+
+    # True solutions (using full symmetric matrix)
+    M_full = M + M.T - jnp.diag(jnp.diag(M))
+    true_x1 = jnp.linalg.solve(M_full, b1)
+    true_x2 = jnp.linalg.solve(M_full, b2)
+
+    print(f"True x1: {true_x1}")
+    print(f"True x2: {true_x2}")
+
+    # Convert to CSR (upper triangular)
+    LHS = jsparse.BCSR.fromdense(M)
+    csr_offsets = LHS.indptr
+    csr_columns = LHS.indices
+    csr_values = LHS.data
+
+    # Create solver (symmetric, upper triangular)
+    device_id = 0
+    mtype_id = 1  # symmetric
+    mview_id = 1  # upper
+
+    _solver = CuDSSSolver(csr_offsets, csr_columns, device_id, mtype_id, mview_id)
+
+    # Create two partials - exactly like jaxipm does
+    linear_solve = ft.partial(_solver, refactorize_signal=jnp.array([0], dtype=jnp.int32))
+    refactorize_and_linear_solve = ft.partial(_solver, refactorize_signal=jnp.array([1], dtype=jnp.int32))
+
+    # JIT compile them together in a function that calls both
+    @eqx.filter_jit
+    def solve_two_rhs(b1, b2, csr_values):
+        # First call: refactorize_and_linear_solve (should do ANALYSIS + FACTORIZATION)
+        x1, inertia1 = refactorize_and_linear_solve(b1, csr_values)
+
+        # Second call: linear_solve (should use cached factorization, just SOLVE)
+        x2, inertia2 = linear_solve(b2, csr_values)
+
+        return x1, x2, inertia1, inertia2
+
+    print("\n--- First JIT call ---")
+    x1, x2, in1, in2 = solve_two_rhs(b1, b2, csr_values)
+
+    print(f"\nComputed x1: {x1}")
+    print(f"Computed x2: {x2}")
+
+    error1 = jnp.linalg.norm(x1 - true_x1)
+    error2 = jnp.linalg.norm(x2 - true_x2)
+
+    print(f"\nError in x1 (refactorize_and_linear_solve): {error1}")
+    print(f"Error in x2 (linear_solve): {error2}")
+
+    if error1 < 1e-10 and error2 < 1e-10:
+        print("\n✓ PASSED: Both solutions are correct - state is being shared!")
+    else:
+        print("\n✗ FAILED: Solutions are incorrect!")
+        if error1 > 1e-10:
+            print(f"  - x1 error: {error1}")
+        if error2 > 1e-10:
+            print(f"  - x2 error: {error2} (linear_solve is NOT using the factorization from refactorize_and_linear_solve)")
+
+    print("\n--- Second JIT call (should reuse compiled function) ---")
+    # Change RHS but keep same matrix
+    b3 = jnp.array([2.0, 3.0, 4.0, 5.0, 6.0])
+    b4 = jnp.array([6.0, 5.0, 4.0, 3.0, 2.0])
+    true_x3 = jnp.linalg.solve(M_full, b3)
+    true_x4 = jnp.linalg.solve(M_full, b4)
+
+    x3, x4, in3, in4 = solve_two_rhs(b3, b4, csr_values)
+
+    error3 = jnp.linalg.norm(x3 - true_x3)
+    error4 = jnp.linalg.norm(x4 - true_x4)
+
+    print(f"Error in x3 (refactorize_and_linear_solve): {error3}")
+    print(f"Error in x4 (linear_solve): {error4}")
+
+    if error3 < 1e-10 and error4 < 1e-10:
+        print("\n✓ PASSED: Second call also correct!")
+    else:
+        print("\n✗ FAILED: Second call has errors!")
+
+    # Now test the pattern where linear_solve is called BEFORE refactorize_and_linear_solve
+    # This should fail because there's no factorization yet
+    print("\n--- Testing WRONG order (linear_solve before refactorize) ---")
+
+    @eqx.filter_jit
+    def solve_wrong_order(b1, b2, csr_values):
+        # First call: linear_solve (no factorization exists!)
+        x1, inertia1 = linear_solve(b1, csr_values)
+
+        # Second call: refactorize_and_linear_solve
+        x2, inertia2 = refactorize_and_linear_solve(b2, csr_values)
+
+        return x1, x2, inertia1, inertia2
+
+    x1_wrong, x2_wrong, _, _ = solve_wrong_order(b1, b2, csr_values)
+
+    error1_wrong = jnp.linalg.norm(x1_wrong - true_x1)
+    error2_wrong = jnp.linalg.norm(x2_wrong - true_x2)
+
+    print(f"Error in x1 (linear_solve first): {error1_wrong}")
+    print(f"Error in x2 (refactorize_and_linear_solve second): {error2_wrong}")
+
+    if error1_wrong > 1e-5:
+        print("\n✓ Expected: linear_solve fails when called before any refactorization")
+    else:
+        print("\n? Unexpected: linear_solve works even without prior refactorization")
+
+    print("\n" + "="*70)
+
+    # TEST 2: Single call site via loop
+    print("\n" + "="*70)
+    print("TEST 2: Single call site via lax.fori_loop")
+    print("="*70)
+
+    # Stack RHS vectors and signals
+    b_stack = jnp.stack([b1, b2])
+    signal_stack = jnp.array([[1], [0]], dtype=jnp.int32)  # First refactorize, then just solve
+
+    @eqx.filter_jit
+    def solve_via_loop(b_stack, signal_stack, csr_values):
+        def body(i, carry):
+            xs, inertias = carry
+            x, inertia = _solver(b_stack[i], csr_values, signal_stack[i])
+            xs = xs.at[i].set(x)
+            inertias = inertias.at[i].set(inertia)
+            return (xs, inertias)
+
+        init_xs = jnp.zeros_like(b_stack)
+        init_inertias = jnp.zeros((2, 2), dtype=jnp.int32)
+        xs, inertias = jax.lax.fori_loop(0, 2, body, (init_xs, init_inertias))
+        return xs, inertias
+
+    print("\n--- Calling via loop (single FFI call site) ---")
+    xs_loop, inertias_loop = solve_via_loop(b_stack, signal_stack, csr_values)
+
+    print(f"\nComputed x1: {xs_loop[0]}")
+    print(f"Computed x2: {xs_loop[1]}")
+
+    error1_loop = jnp.linalg.norm(xs_loop[0] - true_x1)
+    error2_loop = jnp.linalg.norm(xs_loop[1] - true_x2)
+
+    print(f"\nError in x1 (refactorize via loop): {error1_loop}")
+    print(f"Error in x2 (solve-only via loop): {error2_loop}")
+
+    if error1_loop < 1e-10 and error2_loop < 1e-10:
+        print("\n✓ PASSED: Loop-based approach shares state correctly!")
+    else:
+        print("\n✗ FAILED: Loop-based approach also fails")
+
+    print("\n" + "="*70)
+    return error2 < 1e-10  # Return whether the critical test passed
+
+
 if __name__ == "__main__":
 
+    # Run the state sharing test first
+    test_state_sharing()
+    print("\n\n")
 
     # example usage
     # -------------

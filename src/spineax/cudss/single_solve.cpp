@@ -218,10 +218,9 @@ static ffi::Error CudssExecute(
     const int64_t mview_id                  // {0: full, 1: triu, 2: tril}
 ) {
 
-    // instantiate system branch
+    // First call: full initialization
     if (state->call_count == 0) {
-
-        // figure this out on first call
+        // Figure out dimensions on first call
         state->n = offsets_buf.element_count() - 1;
         state->nnz = columns_buf.element_count();
 
@@ -245,45 +244,36 @@ static ffi::Error CudssExecute(
             CUDA_R_32I, state->cuda_dtype,
             state->mtype, state->mview, state->base), state->status, "cudssMatrixCreateCsr");
 
-        // CuDSS config
-        // iterative refinement of the soln is pretty n i f t y
-        int iter_ref_nsteps = 5; // 5
+        // CuDSS config - iterative refinement
+        int iter_ref_nsteps = 3;
         CUDSS_CALL_AND_CHECK(cudssConfigSet(state->config, CUDSS_CONFIG_IR_N_STEPS,
                             &iter_ref_nsteps, sizeof(iter_ref_nsteps)), state->status, "cudssConfigSet ir_nsteps");
 
-        // cold solve - analyze, factorize, solve
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_ANALYSIS, 
+        // First solve: analyze, factorize, solve
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_ANALYSIS,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute analysis");
-
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_FACTORIZATION, 
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_FACTORIZATION,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute factorization");
-
-        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE, 
+        CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
-        
+
         state->call_count++;
     }
     else {
-        // stream can change between calls!!!
+        // Stream can change between calls
         CUDSS_CALL_AND_CHECK(cudssSetStream(state->handle, stream), state->status, "cudssSetStream");
 
-        // Read refactorize signal from GPU to host (cudaMemcpy is synchronous)
+        // Read refactorize signal from GPU to host
         cudaMemcpy(&state->do_refactorize, refactorize_signal.typed_data(),
                    sizeof(int32_t), cudaMemcpyDeviceToHost);
 
-        // set the values of the matrices
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update_pointers b");
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update_pointers x");
+        // Always update all matrix value pointers (JAX may reuse buffers)
+        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update b");
+        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update x");
+        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->A, csr_values_buf.typed_data()), state->status, "update A");
 
         // Conditionally refactorize based on traced signal
         if (state->do_refactorize) {
-            // printf("we aRE refactorizing in single solver\n");
-            // only update A if we are refactorizing it
-            CUDSS_CALL_AND_CHECK(cudssMatrixSetCsrPointers(state->A,
-                offsets_buf.typed_data(), NULL,
-                columns_buf.typed_data(),
-                csr_values_buf.typed_data()), state->status, "update_pointers A");
-
             CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION,
                 state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
         }

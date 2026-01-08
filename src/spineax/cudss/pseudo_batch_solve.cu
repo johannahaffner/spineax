@@ -367,10 +367,10 @@ static ffi::Error CudssExecute(
         state->call_count++;
 
     } else {
-        // stream can change between calls!!!
+        // Stream can change between calls
         CUDSS_CALL_AND_CHECK(cudssSetStream(state->handle, stream), state->status, "cudssSetStream");
 
-        // Check if sparsity pattern pointers have changed
+        // Check if sparsity pattern pointers have changed (JAX may reallocate)
         int32_t* current_offsets_ptr = offsets_buf.typed_data();
         int32_t* current_columns_ptr = columns_buf.typed_data();
 
@@ -383,26 +383,21 @@ static ffi::Error CudssExecute(
                 &state->batched_offsets_ptr, &state->batched_columns_ptr,
                 stream
             );
-
-            // Update cached pointers
             state->cached_offsets_ptr = current_offsets_ptr;
             state->cached_columns_ptr = current_columns_ptr;
         }
-        // else: Pointers unchanged - batched structure is still valid, skip kernel!
 
-        // Read refactorize signal from GPU to host (cudaMemcpy is synchronous)
+        // Read refactorize signal from GPU to host
         cudaMemcpy(&state->do_refactorize, refactorize_signal.typed_data(),
                    sizeof(int32_t), cudaMemcpyDeviceToHost);
 
-        // Update the values pointer which changes between calls
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update_pointers b");
-        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update_pointers x");
+        // Always update all matrix value pointers (JAX may reuse buffers)
+        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->b, b_values_buf.typed_data()), state->status, "update b");
+        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->x, out_values_buf->typed_data()), state->status, "update x");
+        CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->A, csr_values_buf.typed_data()), state->status, "update A");
 
         // Conditionally refactorize based on traced signal
         if (state->do_refactorize) {
-            // printf("we ARE refactorizing in batch solver\n");
-            // Only update the LHS matrix IF we are refactorizing - otherwise it stays the same - along with the factorization
-            CUDSS_CALL_AND_CHECK(cudssMatrixSetValues(state->A, csr_values_buf.typed_data()), state->status, "update_pointers A");
             CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_REFACTORIZATION,
                 state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute refactorization");
         }
@@ -410,7 +405,6 @@ static ffi::Error CudssExecute(
         // Always solve
         CUDSS_CALL_AND_CHECK(cudssExecute(state->handle, CUDSS_PHASE_SOLVE,
             state->config, state->data, state->A, state->x, state->b), state->status, "cudssExecute solve");
-
     }
 
     cudssDataGet(state->handle, state->data, CUDSS_DATA_DIAG, diag_buf->typed_data(),
