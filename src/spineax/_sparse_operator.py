@@ -59,6 +59,11 @@ def _(operator):
     )
     return COOLinearOperator(conj_coo)
 
+@lx.diagonal.register(COOLinearOperator)
+def _(operator):
+    # TODO(jhaffner): Inefficient materialised method
+    return jnp.diag(operator.as_matrix())
+
 @lx.has_unit_diagonal.register(COOLinearOperator)
 def _(operator):
     return lx.unit_diagonal_tag in operator.tags
