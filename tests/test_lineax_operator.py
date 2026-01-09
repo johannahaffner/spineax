@@ -1,12 +1,10 @@
 # Run the lineax tests, but for Spineax operators
-import spineax as spx
-import sys
 import jax.numpy as jnp
+import pytest
 from .helpers import make_coo_operator
 
 from .lineax_test_utils import lx_tests
 
-import pytest
 
 
 @pytest.mark.parametrize("make_operator", (make_coo_operator,))
