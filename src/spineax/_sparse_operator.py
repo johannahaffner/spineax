@@ -39,7 +39,9 @@ class COOLinearOperator(lx.AbstractLinearOperator):
         return self.operator.todense()
 
     def transpose(self):
-        return COOLinearOperator(self.operator.transpose(), lx.transpose_tags(self.tags))
+        return COOLinearOperator(
+            self.operator.transpose(), lx.transpose_tags(self.tags)
+        )
 
     def in_structure(self):
         _, in_size = self.operator.shape
@@ -59,14 +61,17 @@ def _(operator):
     )
     return COOLinearOperator(conj_coo)
 
+
 @lx.diagonal.register(COOLinearOperator)
 def _(operator):
     # TODO(jhaffner): Inefficient materialised method
     return jnp.diag(operator.as_matrix())
 
+
 @lx.has_unit_diagonal.register(COOLinearOperator)
 def _(operator):
     return lx.unit_diagonal_tag in operator.tags
+
 
 @lx.is_diagonal.register(COOLinearOperator)
 def _(operator):
@@ -74,17 +79,21 @@ def _(operator):
         operator.in_size() == 1 and operator.out_size() == 1
     )
 
+
 @lx.is_lower_triangular.register(COOLinearOperator)
 def _(operator):
     return lx.lower_triangular_tag in operator.tags
+
 
 @lx.is_negative_semidefinite.register(COOLinearOperator)
 def _(operator):
     return lx.negative_semidefinite_tag in operator.tags
 
+
 @lx.is_positive_semidefinite.register(COOLinearOperator)
 def _(operator):
     return lx.positive_semidefinite_tag in operator.tags
+
 
 @lx.is_symmetric.register(COOLinearOperator)
 def _(operator):
@@ -98,21 +107,26 @@ def _(operator):
         )
     )
 
+
 @lx.is_tridiagonal.register(COOLinearOperator)
 def _(operator):
     return lx.tridiagonal_tag in operator.tags or lx.diagonal_tag in operator.tags
+
 
 @lx.is_upper_triangular.register(COOLinearOperator)
 def _(operator):
     return lx.upper_triangular_tag in operator.tags
 
+
 @lx.linearise.register(COOLinearOperator)
 def _(operator):
     return operator
 
+
 @lx.materialise.register(COOLinearOperator)
 def _(operator):
     return operator
+
 
 @lx.tridiagonal.register(COOLinearOperator)
 def _(operator):
