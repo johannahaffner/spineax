@@ -6,10 +6,6 @@ from .helpers import make_coo_operator
 
 from .lineax_test_utils import lx_tests
 
-# def test_my_sparse_operator():
-#    matrix = LineaxTests.construct_matrix(...)
-#    LineaxTests.test_vmap_jvp(...)
-
 import pytest
 
 
