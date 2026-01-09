@@ -1,1 +1,1 @@
-from ._sparse_operator import COOLineaOperator as COOLinearOperator
+from ._sparse_operator import COOLinearOperator as COOLinearOperator
