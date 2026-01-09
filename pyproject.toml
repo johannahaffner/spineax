@@ -28,9 +28,8 @@ dependencies = [
 minimum-version = "0.5"
 build-dir = "build/{wheel_tag}"
 editable.rebuild = true # in an editable install rebuild upon changes
+wheel.packages = ["src/spineax"]
 
-[tool.setuptools.packages.find]
-where = [
-    "src"
-]
+[tool.pytest.ini_options]
+norecursedirs = ["lineax"]
 
